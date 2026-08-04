@@ -2,15 +2,27 @@ import time
 import network
 import requests
 import gc
+import sensor
 
 # --- Configuration ---
-WIFI_SSID = "Matthew's Hotspot"
-WIFI_PASS = "yyq447ty746djia"
+WIFI_SSID = "eir85227665"
+WIFI_PASS = "xV2dSg9ruH"
 
-STATION_NAME = "Malahide"
+STATION_NAME = "Donabate"
 API_URL = f"http://api.irishrail.ie/realtime/realtime.asmx/getStationDataByNameXML?StationDesc={STATION_NAME}"
 
-# Helper function to extract text between XML tags without external XML libraries
+# State Definitions
+STATE_API_POLL = 0
+STATE_ARMED_WATCH = 1
+STATE_INFER_LOG = 2
+
+# Track ROI over train lines (x, y, w, h) - adjust for your frame view
+TRACK_ROI = (100, 100, 120, 80)
+
+# Motion Detection Sensitivity (Adjust based on ambient daylight/camera distance)
+MOTION_THRESHOLD = 25
+
+# --- Helper Functions ---
 def get_tag_value(xml_block, tag_name, default=""):
     start_tag = f"<{tag_name}>"
     end_tag = f"</{tag_name}>"
@@ -27,7 +39,6 @@ def get_tag_value(xml_block, tag_name, default=""):
 
     return xml_block[start_pos:end_pos].strip()
 
-# --- Connect to Wi-Fi ---
 def connect_wifi():
     wlan = network.WLAN(network.STA_IF)
     wlan.active(True)
@@ -46,18 +57,13 @@ def connect_wifi():
     print("Wi-Fi Connection Failed.")
     return False
 
-# --- Fetch & Parse Irish Rail API ---
-# --- Fetch & Parse Irish Rail API ---
 def check_trains():
-    print(f"\n--- Checking Trains for {STATION_NAME} ---")
-
+    print(f"\n--- Checking API Data for {STATION_NAME} ---")
     next_train_mins = 999
 
     try:
         res = requests.get(API_URL)
         if res.status_code == 200:
-
-            # 1. Safely handle both string and raw byte responses
             if hasattr(res, "text") and isinstance(res.text, str):
                 xml_text = res.text
             elif hasattr(res, "content"):
@@ -66,13 +72,11 @@ def check_trains():
             else:
                 xml_text = str(res)
 
-            # 2. Safely close socket connection across different MicroPython request implementations
             if hasattr(res, "close"):
                 res.close()
             elif hasattr(res, "socket"):
                 res.socket.close()
 
-            # --- Parse XML String ---
             train_blocks = xml_text.split("<objStationData>")
             train_count = len(train_blocks) - 1
 
@@ -103,7 +107,8 @@ def check_trains():
                 if due_in < 10:
                     print(f"[{line_name}] Code: {train_code}")
                     print(f"  Due in: {due_in} mins | Delay: {delay_str}")
-                    print(f"  Current Status/Location: {last_loc}")
+                    print(f"  Destination: {destination}")
+                    print(f"  Status/Location: {last_loc}")
                     print("-" * 40)
 
             if train_count == 0:
@@ -119,21 +124,75 @@ def check_trains():
     except Exception as e:
         print("API Error:", e)
 
-    # Force garbage collection to keep socket and memory free
     gc.collect()
-
     return next_train_mins
 
-# --- Main Dynamic Polling Loop ---
+def init_camera():
+    sensor.reset()
+    sensor.set_pixformat(sensor.RGB565)
+    sensor.set_framesize(sensor.QVGA)  # 320x240
+    sensor.set_auto_exposure(False, exposure_us=2000)  # High shutter speed to freeze train motion
+    sensor.skip_frames(time=2000)
+
+# --- Initializing System ---
 if connect_wifi():
+    init_camera()
+
+    current_state = STATE_API_POLL
+    last_api_check = 0
+    poll_interval = 300000  # Default 5 mins in ms
+    next_train_due = 999
+    extra_bg_frame = None   # Frame reference for optical motion detection
+
     while True:
-        shortest_wait = check_trains()
+        now = time.ticks_ms()
 
-        if shortest_wait <= 10:
-            poll_interval = 120  # 2 minutes
-            print(">> Train approaching soon! Polling interval set to 2 minutes.")
-        else:
-            poll_interval = 300  # 5 minutes
-            print(">> No imminent trains. Polling interval set to 5 minutes.")
+        # --- STATE 0: API Polling Loop ---
+        if current_state == STATE_API_POLL:
+            if time.ticks_diff(now, last_api_check) >= poll_interval or last_api_check == 0:
+                next_train_due = check_trains()
+                last_api_check = time.ticks_ms()
 
-        time.sleep(poll_interval)
+                if next_train_due <= 3:
+                    print(">> Train in <= 3 mins! Arming camera motion watch...")
+                    extra_bg_frame = sensor.snapshot().copy() # Grab baseline static frame
+                    current_state = STATE_ARMED_WATCH
+                elif next_train_due <= 10:
+                    poll_interval = 120000  # Poll every 2 mins
+                else:
+                    poll_interval = 300000  # Poll every 5 mins
+
+        # --- STATE 1: Motion Watch (Frame Differencing) ---
+        elif current_state == STATE_ARMED_WATCH:
+            img = sensor.snapshot()
+
+            # Compute frame difference inside TRACK_ROI vs initial baseline frame
+            diff_img = img.difference(extra_bg_frame)
+            stats = diff_img.get_statistics(roi=TRACK_ROI)
+
+            # If pixel change in ROI exceeds threshold, a train is passing!
+            if stats.max()[0] > MOTION_THRESHOLD:
+                print(">> Motion Detected in ROI! Capturing frame for classification...")
+                current_state = STATE_INFER_LOG
+
+            # Update baseline frame continuously to adapt to slow sunlight changes
+            extra_bg_frame = img.copy()
+
+        # --- STATE 2: Inference & Logging ---
+        elif current_state == STATE_INFER_LOG:
+            # Capture clean high-speed frame
+            img = sensor.snapshot()
+
+            # -------------------------------------------------------------
+            # TODO:
+            # 1. Run local quantized TFLite / Edge Impulse model on 'img'
+            # 2. Extract classification class and confidence score
+            # 3. Save snapshot to SD Card or HTTP POST payload to database
+            # -------------------------------------------------------------
+
+            print(">> Event logged successfully. Cooling down for 3 mins...")
+            poll_interval = 180000  # Wait 3 mins for train to fully pass
+            last_api_check = time.ticks_ms()
+            current_state = STATE_API_POLL
+
+        time.sleep_ms(10)  # CPU yield
