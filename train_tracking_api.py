@@ -8,8 +8,10 @@ import sensor
 WIFI_SSID = "eir85227665"
 WIFI_PASS = "xV2dSg9ruH"
 
-STATION_NAME = "Donabate"
-API_URL = f"http://api.irishrail.ie/realtime/realtime.asmx/getStationDataByNameXML?StationDesc={STATION_NAME}"
+SOUTH_STATION_NAME = "Donabate"
+NORTH_STATION_NAME = "Rush and Lusk"
+NORTH_API_URL = f"http://api.irishrail.ie/realtime/realtime.asmx/getStationDataByNameXML?StationDesc={NORTH_STATION_NAME}"
+SOUTH_API_URL = f"http://api.irishrail.ie/realtime/realtime.asmx/getStationDataByNameXML?StationDesc={SOUTH_STATION_NAME}"
 
 # State Definitions
 STATE_API_POLL = 0
@@ -57,7 +59,7 @@ def connect_wifi():
     print("Wi-Fi Connection Failed.")
     return False
 
-def check_trains():
+def check_trains(STATION_NAME, API_URL):
     print(f"\n--- Checking API Data for {STATION_NAME} ---")
     next_train_mins = 999
 
@@ -92,12 +94,18 @@ def check_trains():
                 late_mins = get_tag_value(block, "Late", "0")
                 last_loc = get_tag_value(block, "Lastlocation", "No location info")
 
+
                 if "Belfast" in origin or "Belfast" in destination or train_type == "INTERCITY":
                     line_name = "Belfast Intercity"
-                elif "Drogheda" in destination or "Dundalk" in destination:
-                    line_name = "Drogheda/Dundalk Commuter"
                 else:
-                    line_name = f"Commuter/DART ({origin} -> {destination})"
+                    line_name = "Drogheda/Dundalk Commuter"
+
+                northbound_destinations = ("Belfast", "Drogheda", "Dundalk")
+
+                if any(dest in destination for dest in northbound_destinations):
+                    direction = "North"
+                else:
+                    direction = "South"
 
                 delay_str = "On Time" if late_mins == "0" else f"{late_mins} mins late"
 
@@ -150,10 +158,11 @@ if connect_wifi():
         # --- STATE 0: API Polling Loop ---
         if current_state == STATE_API_POLL:
             if time.ticks_diff(now, last_api_check) >= poll_interval or last_api_check == 0:
-                next_train_due = check_trains()
+                next_train_due_north = check_trains(NORTH_STATION_NAME, NORTH_API_URL)
+                next_train_due_south = check_trains(SOUTH_STATION_NAME, SOUTH_API_URL)
                 last_api_check = time.ticks_ms()
 
-                if next_train_due <= 3:
+                if next_train_due_north <= 3 or next_train_due_south <= 3: # FIX THIS FOR CORRECT TIMINGS BASED ON DIRECTION
                     print(">> Train in <= 3 mins! Arming camera motion watch...")
                     extra_bg_frame = sensor.snapshot().copy() # Grab baseline static frame
                     current_state = STATE_ARMED_WATCH
@@ -174,6 +183,7 @@ if connect_wifi():
             if stats.max()[0] > MOTION_THRESHOLD:
                 print(">> Motion Detected in ROI! Capturing frame for classification...")
                 current_state = STATE_INFER_LOG
+
 
             # Update baseline frame continuously to adapt to slow sunlight changes
             extra_bg_frame = img.copy()
