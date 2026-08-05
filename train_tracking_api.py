@@ -10,7 +10,9 @@ WIFI_PASS = "xV2dSg9ruH"
 
 SOUTH_STATION_NAME = "Donabate"
 NORTH_STATION_NAME = "Rush and Lusk"
-NORTH_API_URL = f"http://api.irishrail.ie/realtime/realtime.asmx/getStationDataByNameXML?StationDesc={NORTH_STATION_NAME}"
+
+# URL-encode spaces as %20 for both stations
+NORTH_API_URL = "http://api.irishrail.ie/realtime/realtime.asmx/getStationDataByNameXML?StationDesc=Rush%20and%20Lusk"
 SOUTH_API_URL = f"http://api.irishrail.ie/realtime/realtime.asmx/getStationDataByNameXML?StationDesc={SOUTH_STATION_NAME}"
 
 # State Definitions
@@ -18,13 +20,24 @@ STATE_API_POLL = 0
 STATE_ARMED_WATCH = 1
 STATE_INFER_LOG = 2
 
-# Track ROI over train lines (x, y, w, h) - adjust for your frame view
+# Track ROI over train lines (x, y, w, h)
 TRACK_ROI = (100, 100, 120, 80)
 
-# Motion Detection Sensitivity (Adjust based on ambient daylight/camera distance)
+# Motion Detection Sensitivity
 MOTION_THRESHOLD = 25
 
-# --- Helper Functions ---
+# --- Safe Integer Conversion Helper ---
+def safe_int(val, default=999):
+    """Safely converts string values (including negative ints like '-1') to integers."""
+    val = val.strip()
+    if not val:
+        return default
+    try:
+        return int(val)
+    except ValueError:
+        return default
+
+# --- XML Helper ---
 def get_tag_value(xml_block, tag_name, default=""):
     start_tag = f"<{tag_name}>"
     end_tag = f"</{tag_name}>"
@@ -88,12 +101,14 @@ def check_trains(STATION_NAME, API_URL):
                 destination = get_tag_value(block, "Destination", "")
                 train_type = get_tag_value(block, "Traintype", "")
 
+                # Use safe_int helper to prevent 'base 10' string parsing crashes
                 due_in_raw = get_tag_value(block, "Duein", "999")
-                due_in = int(due_in_raw) if due_in_raw.isdigit() else 999
+                due_in = safe_int(due_in_raw, 999)
 
-                late_mins = get_tag_value(block, "Late", "0")
+                late_mins_raw = get_tag_value(block, "Late", "0")
+                late_mins = safe_int(late_mins_raw, 0)
+
                 last_loc = get_tag_value(block, "Lastlocation", "No location info")
-
 
                 if "Belfast" in origin or "Belfast" in destination or train_type == "INTERCITY":
                     line_name = "Belfast Intercity"
@@ -101,19 +116,16 @@ def check_trains(STATION_NAME, API_URL):
                     line_name = "Drogheda/Dundalk Commuter"
 
                 northbound_destinations = ("Belfast", "Drogheda", "Dundalk")
+                direction = "North" if any(dest in destination for dest in northbound_destinations) else "South"
 
-                if any(dest in destination for dest in northbound_destinations):
-                    direction = "North"
-                else:
-                    direction = "South"
+                delay_str = "On Time" if late_mins == 0 else f"{late_mins} mins late"
 
-                delay_str = "On Time" if late_mins == "0" else f"{late_mins} mins late"
-
-                if due_in < next_train_mins:
+                # Filter out negative numbers (trains already departing/passed)
+                if 0 <= due_in < next_train_mins:
                     next_train_mins = due_in
 
-                if due_in < 10:
-                    print(f"[{line_name}] Code: {train_code}")
+                if 0 <= due_in < 10:
+                    print(f"[{line_name} - {direction}bound] Code: {train_code}")
                     print(f"  Due in: {due_in} mins | Delay: {delay_str}")
                     print(f"  Destination: {destination}")
                     print(f"  Status/Location: {last_loc}")
@@ -139,7 +151,7 @@ def init_camera():
     sensor.reset()
     sensor.set_pixformat(sensor.RGB565)
     sensor.set_framesize(sensor.QVGA)  # 320x240
-    sensor.set_auto_exposure(False, exposure_us=2000)  # High shutter speed to freeze train motion
+    sensor.set_auto_exposure(False, exposure_us=2000)
     sensor.skip_frames(time=2000)
 
 # --- Initializing System ---
@@ -149,8 +161,7 @@ if connect_wifi():
     current_state = STATE_API_POLL
     last_api_check = 0
     poll_interval = 300000  # Default 5 mins in ms
-    next_train_due = 999
-    extra_bg_frame = None   # Frame reference for optical motion detection
+    extra_bg_frame = None
 
     while True:
         now = time.ticks_ms()
@@ -160,11 +171,14 @@ if connect_wifi():
             if time.ticks_diff(now, last_api_check) >= poll_interval or last_api_check == 0:
                 next_train_due_north = check_trains(NORTH_STATION_NAME, NORTH_API_URL)
                 next_train_due_south = check_trains(SOUTH_STATION_NAME, SOUTH_API_URL)
+
+                # Minimum time between either station
+                next_train_due = min(next_train_due_north, next_train_due_south)
                 last_api_check = time.ticks_ms()
 
-                if next_train_due_north <= 3 or next_train_due_south <= 3: # FIX THIS FOR CORRECT TIMINGS BASED ON DIRECTION
-                    print(">> Train in <= 3 mins! Arming camera motion watch...")
-                    extra_bg_frame = sensor.snapshot().copy() # Grab baseline static frame
+                if next_train_due <= 3:
+                    print(">> Train approaching in <= 3 mins! Arming camera motion watch...")
+                    extra_bg_frame = sensor.snapshot().copy()
                     current_state = STATE_ARMED_WATCH
                 elif next_train_due <= 10:
                     poll_interval = 120000  # Poll every 2 mins
@@ -175,34 +189,22 @@ if connect_wifi():
         elif current_state == STATE_ARMED_WATCH:
             img = sensor.snapshot()
 
-            # Compute frame difference inside TRACK_ROI vs initial baseline frame
             diff_img = img.difference(extra_bg_frame)
             stats = diff_img.get_statistics(roi=TRACK_ROI)
 
-            # If pixel change in ROI exceeds threshold, a train is passing!
-            if stats.max()[0] > MOTION_THRESHOLD:
+            if stats.max > MOTION_THRESHOLD:
                 print(">> Motion Detected in ROI! Capturing frame for classification...")
                 current_state = STATE_INFER_LOG
 
-
-            # Update baseline frame continuously to adapt to slow sunlight changes
             extra_bg_frame = img.copy()
 
         # --- STATE 2: Inference & Logging ---
         elif current_state == STATE_INFER_LOG:
-            # Capture clean high-speed frame
             img = sensor.snapshot()
 
-            # -------------------------------------------------------------
-            # TODO:
-            # 1. Run local quantized TFLite / Edge Impulse model on 'img'
-            # 2. Extract classification class and confidence score
-            # 3. Save snapshot to SD Card or HTTP POST payload to database
-            # -------------------------------------------------------------
-
             print(">> Event logged successfully. Cooling down for 3 mins...")
-            poll_interval = 180000  # Wait 3 mins for train to fully pass
+            poll_interval = 180000  # Wait 3 mins for train to clear
             last_api_check = time.ticks_ms()
             current_state = STATE_API_POLL
 
-        time.sleep_ms(10)  # CPU yield
+        time.sleep_ms(10)
