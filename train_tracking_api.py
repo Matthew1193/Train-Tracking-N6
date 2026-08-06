@@ -26,6 +26,12 @@ TRACK_ROI = (100, 100, 120, 80)
 # Motion Detection Sensitivity
 MOTION_THRESHOLD = 25
 
+train_tracker = {}
+global_counter = 0
+current_state = STATE_API_POLL
+last_api_check = 0
+poll_interval = 0
+
 # --- Safe Integer Conversion Helper ---
 def safe_int(val, default=999):
     """Safely converts string values (including negative ints like '-1') to integers."""
@@ -120,6 +126,16 @@ def check_trains(STATION_NAME, API_URL):
 
                 delay_str = "On Time" if late_mins == 0 else f"{late_mins} mins late"
 
+                update_schedule_from_api(
+                        train_code=train_code,
+                        origin=origin,
+                        destination=destination,
+                        direction=direction,
+                        scheduled_time=get_tag_value(block, "Schdepart", "00:00"),
+                        due_in=due_in,
+                        late_mins=late_mins
+                )
+
                 # Filter out negative numbers (trains already departing/passed)
                 if 0 <= due_in < next_train_mins:
                     next_train_mins = due_in
@@ -147,6 +163,83 @@ def check_trains(STATION_NAME, API_URL):
     gc.collect()
     return next_train_mins
 
+
+# --- HELPER 1: Register or Update API Schedule Data ---
+def update_schedule_from_api(train_code, origin, destination, direction, scheduled_time, due_in, late_mins):
+    """
+    Called in STATE_API_POLL whenever new API data arrives.
+    If the train isn't in train_tracker yet, it adds it.
+    """
+    if train_code not in train_tracker:
+        train_tracker[train_code] = {
+            "scheduled_time": scheduled_time,  # e.g., "14:15"
+            "api_due_mins": due_in,
+            "api_delay_mins": late_mins,
+            "origin": origin,
+            "destination": destination,
+            "direction": direction,
+            "camera_detected": False,
+            "camera_timestamp": None,
+            "actual_delay_sec": None,
+            "is_unscheduled": False
+        }
+    else:
+        # Update live API estimates if the camera hasn't spotted it yet
+        if not train_tracker[train_code]["camera_detected"]:
+            train_tracker[train_code]["api_due_mins"] = due_in
+            train_tracker[train_code]["api_delay_mins"] = late_mins
+
+
+def find_matching_train_code():
+    """
+    Searches train_tracker for an undetected scheduled train due within 5 mins.
+    Returns the train_code string if found, otherwise returns None.
+    """
+    for code, data in train_tracker.items():
+        if not data["camera_detected"] and not data["is_unscheduled"]:
+            # Match if the train is due between 0 and 5 minutes from now
+            if 0 <= data["api_due_mins"] <= 3:
+                return code
+    return None
+
+# --- HELPER 3: Log Camera Detection Event ---
+def record_camera_detection(counter, epoch_now_sec):
+    """
+    Called in STATE_INFER_LOG when motion is detected and image captured.
+    Updates in-memory dict AND appends the record immediately to local storage.
+    """
+    train_code = find_matching_train_code()
+
+    if train_code:
+        # Match found for scheduled train
+        record = train_tracker[train_code]
+        record["camera_detected"] = True
+        record["camera_timestamp"] = counter  # e.g., "14:18:22"
+
+        # Simple delay math: (Actual Pass Time) - (Scheduled API Time)
+        # Assuming scheduled_time converted to epoch timestamp:
+        # record["actual_delay_sec"] = epoch_now_sec - scheduled_epoch_sec
+
+        print(f">> Linked camera event to scheduled train: {train_code}")
+
+    else:
+        # No API match -> Create unscheduled entry (e.g., freight/maintenance)
+        train_code = f"UNSCHED_{counter}"
+        record = {
+            "scheduled_time": "N/A",
+            "api_due_mins": None,
+            "api_delay_mins": None,
+            "origin": "Unknown",
+            "destination": "Unknown",
+            "direction": "Unknown",
+            "camera_detected": True,
+            "camera_timestamp": counter,
+            "actual_delay_sec": None,
+            "is_unscheduled": True
+        }
+        train_tracker[train_code] = record
+        print(f">> Unscheduled train detected! Logged as: {train_code}")
+
 def init_camera():
     sensor.reset()
     sensor.set_pixformat(sensor.RGB565)
@@ -154,57 +247,67 @@ def init_camera():
     sensor.set_auto_exposure(False, exposure_us=2000)
     sensor.skip_frames(time=2000)
 
-# --- Initializing System ---
-if connect_wifi():
-    init_camera()
 
-    current_state = STATE_API_POLL
-    last_api_check = 0
-    poll_interval = 300000  # Default 5 mins in ms
-    extra_bg_frame = None
+def run_state_tick(now=None):
+    """Executes a single step of the state machine."""
+    global current_state, last_api_check, poll_interval, extra_bg_frame, global_counter
 
-    while True:
+    if now is None:
         now = time.ticks_ms()
 
-        # --- STATE 0: API Polling Loop ---
-        if current_state == STATE_API_POLL:
-            if time.ticks_diff(now, last_api_check) >= poll_interval or last_api_check == 0:
-                next_train_due_north = check_trains(NORTH_STATION_NAME, NORTH_API_URL)
-                next_train_due_south = check_trains(SOUTH_STATION_NAME, SOUTH_API_URL)
+    # --- STATE 0: API Polling Loop ---
+    if current_state == STATE_API_POLL:
+        if (
+            time.ticks_diff(now, last_api_check) >= poll_interval
+            or last_api_check == 0
+        ):
+            next_train_due_north = check_trains(
+                NORTH_STATION_NAME, NORTH_API_URL
+            )
+            next_train_due_south = check_trains(
+                SOUTH_STATION_NAME, SOUTH_API_URL
+            )
 
-                # Minimum time between either station
-                next_train_due = min(next_train_due_north, next_train_due_south)
-                last_api_check = time.ticks_ms()
+            next_train_due = min(next_train_due_north, next_train_due_south)
+            last_api_check = now
 
-                if next_train_due <= 3:
-                    print(">> Train approaching in <= 3 mins! Arming camera motion watch...")
+            if next_train_due_north <= 5 or next_train_due_south <= 3:
+                print(">> Train approaching! Arming camera motion watch...")
+                if sensor:
                     extra_bg_frame = sensor.snapshot().copy()
-                    current_state = STATE_ARMED_WATCH
-                elif next_train_due <= 10:
-                    poll_interval = 120000  # Poll every 2 mins
-                else:
-                    poll_interval = 300000  # Poll every 5 mins
+                current_state = STATE_ARMED_WATCH
+            elif next_train_due <= 10:
+                poll_interval = 120000
+            else:
+                poll_interval = 300000
 
-        # --- STATE 1: Motion Watch (Frame Differencing) ---
-        elif current_state == STATE_ARMED_WATCH:
-            img = sensor.snapshot()
+    # --- STATE 1: Motion Watch ---
+    elif current_state == STATE_ARMED_WATCH:
+        img = sensor.snapshot()
+        diff_img = img.difference(extra_bg_frame)
+        stats = diff_img.get_statistics(roi=TRACK_ROI)
 
-            diff_img = img.difference(extra_bg_frame)
-            stats = diff_img.get_statistics(roi=TRACK_ROI)
+        if stats.max > MOTION_THRESHOLD:
+            print(">> Motion Detected! Capturing frame...")
+            current_state = STATE_INFER_LOG
 
-            if stats.max > MOTION_THRESHOLD:
-                print(">> Motion Detected in ROI! Capturing frame for classification...")
-                current_state = STATE_INFER_LOG
+        extra_bg_frame = img.copy()
 
-            extra_bg_frame = img.copy()
+    # --- STATE 2: Inference & Logging ---
+    elif current_state == STATE_INFER_LOG:
+        img = sensor.snapshot()
+        print(">> Event logged. Cooling down...")
+        poll_interval = 180000
+        last_api_check = now
+        record_camera_detection(last_api_check, epoch_now_sec=time.time())
+        global_counter += 1
+        current_state = STATE_API_POLL
 
-        # --- STATE 2: Inference & Logging ---
-        elif current_state == STATE_INFER_LOG:
-            img = sensor.snapshot()
+    return current_state
 
-            print(">> Event logged successfully. Cooling down for 3 mins...")
-            poll_interval = 180000  # Wait 3 mins for train to clear
-            last_api_check = time.ticks_ms()
-            current_state = STATE_API_POLL
-
-        time.sleep_ms(10)
+if __name__ == "__main__":
+    if connect_wifi():
+        init_camera()
+        while True:
+            run_state_tick()
+            time.sleep_ms(10)
