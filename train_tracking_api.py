@@ -4,6 +4,26 @@ import requests
 import gc
 import sensor
 
+'''
+JSON Schema:
+
+    {
+        "train_code": "E204",
+        "train_type": "COMMUTER", <- commuter/intercity/enterprise/translink/DART
+        "origin": "Dundalk",
+        "destination": "Connolly",
+        "direction": "South",
+        "is_unscheduled": false,
+        "scheduled_epoch_time": 1722953700,
+        "api_polled_epoch_time": 1722953580,
+        "api_delay_mins": 2,
+        "observed_epoch_time": 1722953820,
+        "actual_delay_sec": 120,
+        "api_error_sec": 0,
+        "station_observer": "Rush and Lusk"
+    }
+'''
+
 # --- Configuration ---
 WIFI_SSID = "eir85227665"
 WIFI_PASS = "xV2dSg9ruH"
@@ -31,6 +51,7 @@ global_counter = 0
 current_state = STATE_API_POLL
 last_api_check = 0
 poll_interval = 0
+armed_state_start = 0
 
 # --- Safe Integer Conversion Helper ---
 def safe_int(val, default=999):
@@ -250,7 +271,7 @@ def init_camera():
 
 def run_state_tick(now=None):
     """Executes a single step of the state machine."""
-    global current_state, last_api_check, poll_interval, extra_bg_frame, global_counter
+    global current_state, last_api_check, poll_interval, extra_bg_frame, global_counter, armed_state_start
 
     if now is None:
         now = time.ticks_ms()
@@ -261,12 +282,15 @@ def run_state_tick(now=None):
             time.ticks_diff(now, last_api_check) >= poll_interval
             or last_api_check == 0
         ):
-            next_train_due_north = check_trains(
-                NORTH_STATION_NAME, NORTH_API_URL
-            )
-            next_train_due_south = check_trains(
-                SOUTH_STATION_NAME, SOUTH_API_URL
-            )
+            try:
+                next_train_due_north = check_trains(
+                    NORTH_STATION_NAME, NORTH_API_URL
+                )
+                next_train_due_south = check_trains(
+                    SOUTH_STATION_NAME, SOUTH_API_URL
+                )
+            except:
+                connect_wifi()
 
             next_train_due = min(next_train_due_north, next_train_due_south)
             last_api_check = now
@@ -276,6 +300,7 @@ def run_state_tick(now=None):
                 if sensor:
                     extra_bg_frame = sensor.snapshot().copy()
                 current_state = STATE_ARMED_WATCH
+                armed_state_start = now
             elif next_train_due <= 10:
                 poll_interval = 120000
             else:
@@ -292,6 +317,9 @@ def run_state_tick(now=None):
             current_state = STATE_INFER_LOG
 
         extra_bg_frame = img.copy()
+
+        if time.ticks_diff(now, armed_state_start) > 300000:
+            current_state = STATE_API_POLL
 
     # --- STATE 2: Inference & Logging ---
     elif current_state == STATE_INFER_LOG:
