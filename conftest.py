@@ -1,6 +1,8 @@
 import sys
 from unittest.mock import MagicMock
 
+def ticks_diff(ticks1, ticks2):
+    return ticks1 - ticks2
 
 # Mock MicroPython hardware modules so CPython on laptop doesn't crash
 sys.modules["sensor"] = MagicMock()
@@ -10,7 +12,7 @@ sys.modules["requests"] = MagicMock()
 
 mock_time = MagicMock()
 mock_time.ticks_ms.return_value = 0
-mock_time.ticks_diff.return_value = 0
+mock_time.ticks_diff.side_effect = ticks_diff
 sys.modules["utime"] = mock_time
 sys.modules["time"] = mock_time
 
@@ -31,3 +33,4 @@ def reset_global_state():
         train_tracking_api.train_tracker.clear()
 
     yield
+

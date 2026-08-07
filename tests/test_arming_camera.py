@@ -79,3 +79,22 @@ def test_polling_interval_change(mock_get):
     _ = train_tracking_api.run_state_tick(now=200000)
 
     assert train_tracking_api.poll_interval == 300000
+
+def test_watchdog_timer_armed_state():
+    mock_stats = MagicMock()
+    mock_stats.max = 0
+    train_tracking_api.sensor.snapshot.return_value.difference.return_value.get_statistics.return_value = (
+        mock_stats
+    )
+
+    mock_img = MagicMock()
+    mock_img.difference.return_value.get_statistics.return_value = mock_stats
+    train_tracking_api.sensor.snapshot.return_value = mock_img
+    train_tracking_api.extra_bg_frame = mock_img
+
+    train_tracking_api.current_state = train_tracking_api.STATE_ARMED_WATCH
+    train_tracking_api.armed_state_start = 1000
+
+    _ = train_tracking_api.run_state_tick(now = 310000)
+
+    assert train_tracking_api.current_state == train_tracking_api.STATE_API_POLL

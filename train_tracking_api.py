@@ -295,7 +295,7 @@ def run_state_tick(now=None):
             next_train_due = min(next_train_due_north, next_train_due_south)
             last_api_check = now
 
-            if next_train_due_north <= 5 or next_train_due_south <= 3:
+            if 2 <= next_train_due_north <= 5 or next_train_due_south <= 3:
                 print(">> Train approaching! Arming camera motion watch...")
                 if sensor:
                     extra_bg_frame = sensor.snapshot().copy()
