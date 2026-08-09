@@ -7,7 +7,6 @@ def test_safe_int_valid():
     assert train_tracking_api.safe_int("0") == 0
 
 def test_safe_int_negative_numbers():
-    # Irish Rail sends negative numbers for trains already departing
     assert train_tracking_api.safe_int("-1") == -1
     assert train_tracking_api.safe_int("-5") == -5
 
@@ -35,3 +34,13 @@ def test_check_trains_empty_xml(mock_get):
     assert next_due_north == math.inf
     assert next_due_south == math.inf
     assert len(train_tracking_api.train_tracker) == 0
+
+def test_safe_int_type_robustness():
+    assert train_tracking_api.safe_int(None) == 999
+    assert train_tracking_api.safe_int("  7  ") == 7
+    assert train_tracking_api.safe_int("3.14") == 999  # Float strings fail standard int()
+
+
+def test_get_tag_value_self_closing_and_whitespace():
+    assert train_tracking_api.get_tag_value("<objStationData><Traincode/></objStationData>", "Traincode") == ""
+    assert train_tracking_api.get_tag_value("<Duein>  5  </Duein>", "Duein") == "5"
