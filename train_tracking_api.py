@@ -136,6 +136,8 @@ def check_trains():
 
                     last_loc = get_tag_value(block, "Lastlocation", "No location info")
 
+                    local_due = due_in
+
                     if "Belfast" in origin or "Belfast" in destination or train_type == "INTERCITY":
                         line_name = "Belfast Intercity"
                     else:
@@ -171,6 +173,9 @@ def check_trains():
                             elif "Belfast" in origin and "Dublin%20Connolly" in station:
                                 if 17 <= due_in <= 22:
                                     local_due = due_in - 15
+
+                        if 0 <= local_due < next_train_south:
+                                next_train_south = local_due
 
                     update_schedule_from_api(
                             train_code=train_code,

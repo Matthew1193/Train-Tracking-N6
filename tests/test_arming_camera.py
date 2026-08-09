@@ -11,7 +11,7 @@ def test_arming_camera_under_three_mins(mock_get):
         <objStationData>
             <Traincode>E204</Traincode>
             <Origin>Dundalk</Origin>
-            <Destination>Connolly</Destination>
+            <Destination>Dublin Connolly</Destination>
             <Traintype>Commuter</Traintype>
             <Duein>2</Duein>
             <Late>0</Late>
@@ -31,13 +31,15 @@ def test_arming_camera_under_three_mins(mock_get):
         train_tracking_api.current_state == train_tracking_api.STATE_ARMED_WATCH
     )
 
+
+
 @patch("train_tracking_api.requests.get")
 def test_polling_interval_change(mock_get):
     fake_xml = """<ArrayOfObjStationData>
         <objStationData>
             <Traincode>E204</Traincode>
             <Origin>Dundalk</Origin>
-            <Destination>Connolly</Destination>
+            <Destination>Dublin Connolly</Destination>
             <Traintype>Commuter</Traintype>
             <Duein>8</Duein>
             <Late>0</Late>
