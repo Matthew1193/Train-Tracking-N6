@@ -50,9 +50,9 @@ state_direction = "Unknown"
 # --- Safe Integer Conversion Helper ---
 def safe_int(val, default=999):
     """Safely converts string values (including negative ints like '-1') to integers."""
-    val = val.strip()
     if not val:
         return default
+    val = val.strip()
     try:
         return int(val)
     except ValueError:
@@ -136,7 +136,7 @@ def check_trains():
 
                     last_loc = get_tag_value(block, "Lastlocation", "No location info")
 
-                    local_due = due_in
+                    local_due = INT_MAX
 
                     if "Belfast" in origin or "Belfast" in destination or train_type == "INTERCITY":
                         line_name = "Belfast Intercity"
@@ -165,14 +165,13 @@ def check_trains():
                         if 0 <= local_due < next_train_north:
                             next_train_north = local_due
 
-                    elif "South" in direction:
-                        if "Belfast" in origin and "Dublin%20Connolly" in station: # Have it find the next Belfast train and ignore the rest to
+                    elif "South" in direction:# Have it find the next Belfast train and ignore the rest to
                                                             # speed up Connolly API check, can I query just Belfast destination form Connolly on API?
-                            if "Rush%20and%20Lusk" in station or "Donabate" in station:
-                                local_due = due_in
-                            elif "Belfast" in origin and "Dublin%20Connolly" in station:
-                                if 17 <= due_in <= 22:
-                                    local_due = due_in - 15
+                        if "Rush%20and%20Lusk" in station or "Donabate" in station:
+                            local_due = due_in
+                        elif "Belfast" in origin and "Dublin%20Connolly" in station:
+                            if 17 <= due_in <= 22:
+                                local_due = due_in - 15
 
                         if 0 <= local_due < next_train_south:
                                 next_train_south = local_due
