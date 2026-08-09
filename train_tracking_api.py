@@ -138,8 +138,6 @@ def check_trains():
 
                     if "Belfast" in origin or "Belfast" in destination or train_type == "INTERCITY":
                         line_name = "Belfast Intercity"
-                    elif station == "Drogheda" and ("Drogheda" in destination or "Drogheda" in origin):
-                        continue
                     else:
                         line_name = "Drogheda/Dundalk Commuter"
 
@@ -156,28 +154,23 @@ def check_trains():
                         continue
 
                     if "North" in direction:
-                        if "Belfast" in destination and "Drogheda" in station:
-                            if "Donabate" in last_loc:
-                                next_train_north = 1
-                            elif "Malahide" in last_loc:
-                                next_train_north = 3
-                            elif 17 <= due_in <= 22:
-                                next_train_north = due_in - 15
-                        else:
-                            if 0 <= due_in < next_train_north:
-                                next_train_north = due_in
+                        if "Rush%20and%20Lusk" in station or "Donabate" in station:
+                            local_due = due_in
+                        elif "Belfast" in destination and "Drogheda" in station:
+                            if 17 <= due_in <= 22:
+                                local_due = due_in - 15
+
+                        if 0 <= local_due < next_train_north:
+                            next_train_north = local_due
+
                     elif "South" in direction:
-                        if "Belfast" in origin and "Connolly" in station: # Have it find the next Belfast train and ignore the rest to
+                        if "Belfast" in origin and "Dublin%20Connolly" in station: # Have it find the next Belfast train and ignore the rest to
                                                             # speed up Connolly API check, can I query just Belfast destination form Connolly on API?
-                            if "Rush and Lusk" in last_loc:
-                                next_train_south = 1
-                            elif "Skerries" in last_loc:
-                                next_train_south = 3
-                            elif 15 <= due_in <= 20:
-                                next_train_south = due_in - 14
-                        else:
-                            if 0 <= due_in < next_train_south:
-                                next_train_south = due_in
+                            if "Rush%20and%20Lusk" in station or "Donabate" in station:
+                                local_due = due_in
+                            elif "Belfast" in origin and "Dublin%20Connolly" in station:
+                                if 17 <= due_in <= 22:
+                                    local_due = due_in - 15
 
                     update_schedule_from_api(
                             train_code=train_code,
@@ -198,11 +191,7 @@ def check_trains():
                             next_train_south = due_in
                     '''
 
-                    if (
-                        (0 <= due_in < 10 and ("Donabate" in station or "Rush%20and%20Lusk" in station))
-                        or (17 <= due_in <= 22 and "Drogheda" in station and "Belfast" in destination)
-                        or (15 <= due_in <= 20 and "Dublin%20Connolly" in station and "Dublin Connoly" in destination)
-                       ):
+                    if 0 <= local_due <= 5:
                         print(f"[{line_name} - {direction}bound] Code: {train_code}")
                         print(f"  Due in: {due_in} mins | Delay: {delay_str}")
                         print(f"  Destination: {destination}")
@@ -260,7 +249,7 @@ def find_matching_train_code(direction=None):
     for code, data in train_tracker.items():
         if not data["camera_detected"] and not data["is_unscheduled"]:
             # Match if the train is due between 0 and 5 minutes from now
-            if 0 <= data["api_due_mins"] <= 3 and direction in data["direction"]:
+            if direction in data["direction"]:
                 return code
     return None
 
@@ -365,8 +354,11 @@ def run_state_tick(now=None):
 
     # --- STATE 2: Inference & Logging ---
     elif current_state == STATE_INFER_LOG:
-        img = sensor.snapshot()
+        img = sensor.snapshot() # image of train
         print(">> Event logged. Cooling down...")
+        extra_bg_frame = None
+        gc.collect()
+
         poll_interval = 180000
         last_api_check = now
         record_camera_detection(last_api_check, state_direction, epoch_now_sec=time.time())
