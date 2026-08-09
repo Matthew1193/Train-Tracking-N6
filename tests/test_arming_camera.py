@@ -11,7 +11,7 @@ def test_arming_camera_under_three_mins(mock_get):
         <objStationData>
             <Traincode>E204</Traincode>
             <Origin>Dundalk</Origin>
-            <Destination>Connolly</Destination>
+            <Destination>Dublin Connolly</Destination>
             <Traintype>Commuter</Traintype>
             <Duein>2</Duein>
             <Late>0</Late>
@@ -31,13 +31,15 @@ def test_arming_camera_under_three_mins(mock_get):
         train_tracking_api.current_state == train_tracking_api.STATE_ARMED_WATCH
     )
 
+
+
 @patch("train_tracking_api.requests.get")
 def test_polling_interval_change(mock_get):
     fake_xml = """<ArrayOfObjStationData>
         <objStationData>
             <Traincode>E204</Traincode>
             <Origin>Dundalk</Origin>
-            <Destination>Connolly</Destination>
+            <Destination>Dublin Connolly</Destination>
             <Traintype>Commuter</Traintype>
             <Duein>8</Duein>
             <Late>0</Late>
@@ -98,3 +100,24 @@ def test_watchdog_timer_armed_state():
     _ = train_tracking_api.run_state_tick(now = 310000)
 
     assert train_tracking_api.current_state == train_tracking_api.STATE_API_POLL
+
+def test_armed_state_triggers_recording_on_motion():
+    """Verify state transition when frame difference exceeds motion threshold."""
+    # Setup camera snapshot mock to return motion
+    mock_stats = MagicMock()
+    mock_stats.max = 50  # High frame difference exceeding threshold
+    
+    mock_img = MagicMock()
+    mock_img.difference.return_value.get_statistics.return_value = mock_stats
+    train_tracking_api.sensor.snapshot.return_value = mock_img
+    train_tracking_api.extra_bg_frame = mock_img
+
+    train_tracking_api.current_state = train_tracking_api.STATE_ARMED_WATCH
+    train_tracking_api.armed_state_start = 1000
+
+    # Execute tick before watchdog timeout
+    new_state = train_tracking_api.run_state_tick(now=5000)
+
+    # Assuming state switches to state like STATE_RECORDING or STATE_CAMERA_ACTIVE
+    assert new_state != train_tracking_api.STATE_ARMED_WATCH
+    assert new_state != train_tracking_api.STATE_API_POLL

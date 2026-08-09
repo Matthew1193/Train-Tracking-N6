@@ -3,6 +3,7 @@ import network
 import requests
 import gc
 import sensor
+import math
 
 '''
 JSON Schema:
@@ -24,18 +25,11 @@ JSON Schema:
     }
 '''
 
-# --- Configuration ---
+INT_MAX = math.inf
+
 WIFI_SSID = "eir85227665"
 WIFI_PASS = "xV2dSg9ruH"
 
-SOUTH_STATION_NAME = "Donabate"
-NORTH_STATION_NAME = "Rush and Lusk"
-
-# URL-encode spaces as %20 for both stations
-NORTH_API_URL = "http://api.irishrail.ie/realtime/realtime.asmx/getStationDataByNameXML?StationDesc=Rush%20and%20Lusk"
-SOUTH_API_URL = f"http://api.irishrail.ie/realtime/realtime.asmx/getStationDataByNameXML?StationDesc={SOUTH_STATION_NAME}"
-
-# State Definitions
 STATE_API_POLL = 0
 STATE_ARMED_WATCH = 1
 STATE_INFER_LOG = 2
@@ -43,7 +37,6 @@ STATE_INFER_LOG = 2
 # Track ROI over train lines (x, y, w, h)
 TRACK_ROI = (100, 100, 120, 80)
 
-# Motion Detection Sensitivity
 MOTION_THRESHOLD = 25
 
 train_tracker = {}
@@ -52,13 +45,14 @@ current_state = STATE_API_POLL
 last_api_check = 0
 poll_interval = 0
 armed_state_start = 0
+state_direction = "Unknown"
 
 # --- Safe Integer Conversion Helper ---
 def safe_int(val, default=999):
     """Safely converts string values (including negative ints like '-1') to integers."""
-    val = val.strip()
     if not val:
         return default
+    val = val.strip()
     try:
         return int(val)
     except ValueError:
@@ -99,90 +93,130 @@ def connect_wifi():
     print("Wi-Fi Connection Failed.")
     return False
 
-def check_trains(STATION_NAME, API_URL):
-    print(f"\n--- Checking API Data for {STATION_NAME} ---")
-    next_train_mins = 999
+def check_trains():
+    stations = {"Donabate", "Rush%20and%20Lusk", "Drogheda", "Dublin%20Connolly"} # Search each station a certain period of time ahead to speed up API calls
+    next_train_north = INT_MAX
+    next_train_south = INT_MAX
 
-    try:
-        res = requests.get(API_URL)
-        if res.status_code == 200:
-            if hasattr(res, "text") and isinstance(res.text, str):
-                xml_text = res.text
-            elif hasattr(res, "content"):
-                data = res.content
-                xml_text = data.decode("utf-8") if isinstance(data, bytes) else str(data)
-            else:
-                xml_text = str(res)
+    for station in stations:
+        API_URL = f"http://api.irishrail.ie/realtime/realtime.asmx/getStationDataByNameXML?StationDesc={station}"
+        print(f"\n--- Checking API Data for {station} ---")
 
-            if hasattr(res, "close"):
-                res.close()
-            elif hasattr(res, "socket"):
-                res.socket.close()
-
-            train_blocks = xml_text.split("<objStationData>")
-            train_count = len(train_blocks) - 1
-
-            for block in train_blocks[1:]:
-                train_code = get_tag_value(block, "Traincode", "Unknown")
-                origin = get_tag_value(block, "Origin", "")
-                destination = get_tag_value(block, "Destination", "")
-                train_type = get_tag_value(block, "Traintype", "")
-
-                # Use safe_int helper to prevent 'base 10' string parsing crashes
-                due_in_raw = get_tag_value(block, "Duein", "999")
-                due_in = safe_int(due_in_raw, 999)
-
-                late_mins_raw = get_tag_value(block, "Late", "0")
-                late_mins = safe_int(late_mins_raw, 0)
-
-                last_loc = get_tag_value(block, "Lastlocation", "No location info")
-
-                if "Belfast" in origin or "Belfast" in destination or train_type == "INTERCITY":
-                    line_name = "Belfast Intercity"
+        try:
+            res = requests.get(API_URL)
+            if res.status_code == 200:
+                if hasattr(res, "text") and isinstance(res.text, str):
+                    xml_text = res.text
+                elif hasattr(res, "content"):
+                    data = res.content
+                    xml_text = data.decode("utf-8") if isinstance(data, bytes) else str(data)
                 else:
-                    line_name = "Drogheda/Dundalk Commuter"
+                    xml_text = str(res)
 
-                northbound_destinations = ("Belfast", "Drogheda", "Dundalk")
-                direction = "North" if any(dest in destination for dest in northbound_destinations) else "South"
+                if hasattr(res, "close"):
+                    res.close()
+                elif hasattr(res, "socket"):
+                    res.socket.close()
 
-                delay_str = "On Time" if late_mins == 0 else f"{late_mins} mins late"
+                train_blocks = xml_text.split("<objStationData>")
+                train_count = len(train_blocks) - 1
 
-                update_schedule_from_api(
-                        train_code=train_code,
-                        origin=origin,
-                        destination=destination,
-                        direction=direction,
-                        scheduled_time=get_tag_value(block, "Schdepart", "00:00"),
-                        due_in=due_in,
-                        late_mins=late_mins
-                )
+                for block in train_blocks[1:]:
+                    train_code = get_tag_value(block, "Traincode", "Unknown")
+                    origin = get_tag_value(block, "Origin", "")
+                    destination = get_tag_value(block, "Destination", "")
+                    train_type = get_tag_value(block, "Traintype", "")
 
-                # Filter out negative numbers (trains already departing/passed)
-                if 0 <= due_in < next_train_mins:
-                    next_train_mins = due_in
+                    # Use safe_int helper to prevent 'base 10' string parsing crashes
+                    due_in_raw = get_tag_value(block, "Duein", "999")
+                    due_in = safe_int(due_in_raw, 999)
 
-                if 0 <= due_in < 10:
-                    print(f"[{line_name} - {direction}bound] Code: {train_code}")
-                    print(f"  Due in: {due_in} mins | Delay: {delay_str}")
-                    print(f"  Destination: {destination}")
-                    print(f"  Status/Location: {last_loc}")
-                    print("-" * 40)
+                    late_mins_raw = get_tag_value(block, "Late", "0")
+                    late_mins = safe_int(late_mins_raw, 0)
 
-            if train_count == 0:
-                print("No upcoming trains found in the next 90 mins.")
+                    last_loc = get_tag_value(block, "Lastlocation", "No location info")
 
-        else:
-            print(f"HTTP Error: {res.status_code}")
-            if hasattr(res, "close"):
-                res.close()
-            elif hasattr(res, "socket"):
-                res.socket.close()
+                    local_due = INT_MAX
 
-    except Exception as e:
-        print("API Error:", e)
+                    if "Belfast" in origin or "Belfast" in destination or train_type == "INTERCITY":
+                        line_name = "Belfast Intercity"
+                    else:
+                        line_name = "Drogheda/Dundalk Commuter"
+
+                    delay_str = "On Time" if late_mins == 0 else f"{late_mins} mins late"
+
+                    northbound_destinations = ("Belfast", "Drogheda", "Dundalk")
+                    southbound_destinations = ("Dublin Connolly", "Dublin Pearse", "Grand Canal Dock", "Dun Laoighre", "Bray")
+
+                    if destination in northbound_destinations:
+                        direction = "North"
+                    elif destination in southbound_destinations:
+                        direction = "South"
+                    else:
+                        continue
+
+                    if "North" in direction:
+                        if "Rush%20and%20Lusk" in station or "Donabate" in station:
+                            local_due = due_in
+                        elif "Belfast" in destination and "Drogheda" in station:
+                            if 17 <= due_in <= 22:
+                                local_due = due_in - 15
+
+                        if 0 <= local_due < next_train_north:
+                            next_train_north = local_due
+
+                    elif "South" in direction:# Have it find the next Belfast train and ignore the rest to
+                                                            # speed up Connolly API check, can I query just Belfast destination form Connolly on API?
+                        if "Rush%20and%20Lusk" in station or "Donabate" in station:
+                            local_due = due_in
+                        elif "Belfast" in origin and "Dublin%20Connolly" in station:
+                            if 17 <= due_in <= 22:
+                                local_due = due_in - 15
+
+                        if 0 <= local_due < next_train_south:
+                                next_train_south = local_due
+
+                    update_schedule_from_api(
+                            train_code=train_code,
+                            origin=origin,
+                            destination=destination,
+                            direction=direction,
+                            scheduled_time=get_tag_value(block, "Schdepart", "00:00"),
+                            due_in=due_in,
+                            late_mins=late_mins
+                    )
+
+                    # Filter out negative numbers (trains already departing/passed)
+                    '''
+                    if 0 <= due_in < next_train_mins and direction == "North":
+                        if direction == "North" and due_in < next_north_train:
+                            next_train_north = due_in
+                        elif due_in < next_south_train:
+                            next_train_south = due_in
+                    '''
+
+                    if 0 <= local_due <= 5:
+                        print(f"[{line_name} - {direction}bound] Code: {train_code}")
+                        print(f"  Due in: {due_in} mins | Delay: {delay_str}")
+                        print(f"  Destination: {destination}")
+                        print(f"  Status/Location: {last_loc}")
+                        print("-" * 40)
+
+                if train_count == 0:
+                    print("No upcoming trains found in the next 90 mins.")
+
+            else:
+                print(f"HTTP Error: {res.status_code}")
+                if hasattr(res, "close"):
+                    res.close()
+                elif hasattr(res, "socket"):
+                    res.socket.close()
+
+        except Exception as e:
+            print("API Error:", e)
 
     gc.collect()
-    return next_train_mins
+    return next_train_south, next_train_north  # return lowest time for north/south if it is within the bounds for each, return direction too??
 
 
 # --- HELPER 1: Register or Update API Schedule Data ---
@@ -211,7 +245,7 @@ def update_schedule_from_api(train_code, origin, destination, direction, schedul
             train_tracker[train_code]["api_delay_mins"] = late_mins
 
 
-def find_matching_train_code():
+def find_matching_train_code(direction=None):
     """
     Searches train_tracker for an undetected scheduled train due within 5 mins.
     Returns the train_code string if found, otherwise returns None.
@@ -219,17 +253,17 @@ def find_matching_train_code():
     for code, data in train_tracker.items():
         if not data["camera_detected"] and not data["is_unscheduled"]:
             # Match if the train is due between 0 and 5 minutes from now
-            if 0 <= data["api_due_mins"] <= 3:
+            if direction in data["direction"]:
                 return code
     return None
 
 # --- HELPER 3: Log Camera Detection Event ---
-def record_camera_detection(counter, epoch_now_sec):
+def record_camera_detection(counter,  state_direction, epoch_now_sec):
     """
     Called in STATE_INFER_LOG when motion is detected and image captured.
     Updates in-memory dict AND appends the record immediately to local storage.
     """
-    train_code = find_matching_train_code()
+    train_code = find_matching_train_code(state_direction)
 
     if train_code:
         # Match found for scheduled train
@@ -271,37 +305,35 @@ def init_camera():
 
 def run_state_tick(now=None):
     """Executes a single step of the state machine."""
-    global current_state, last_api_check, poll_interval, extra_bg_frame, global_counter, armed_state_start
+    global current_state, last_api_check, poll_interval, extra_bg_frame, global_counter, armed_state_start, state_direction
+
+    next_train_due_south = INT_MAX
+    next_train_due_north = INT_MAX
 
     if now is None:
         now = time.ticks_ms()
 
     # --- STATE 0: API Polling Loop ---
     if current_state == STATE_API_POLL:
-        if (
-            time.ticks_diff(now, last_api_check) >= poll_interval
-            or last_api_check == 0
-        ):
+        if (time.ticks_diff(now, last_api_check) >= poll_interval or last_api_check == 0):
             try:
-                next_train_due_north = check_trains(
-                    NORTH_STATION_NAME, NORTH_API_URL
-                )
-                next_train_due_south = check_trains(
-                    SOUTH_STATION_NAME, SOUTH_API_URL
-                )
+                next_train_due_south, next_train_due_north = check_trains()
             except:
                 connect_wifi()
 
-            next_train_due = min(next_train_due_north, next_train_due_south)
             last_api_check = now
 
-            if 2 <= next_train_due_north <= 5 or next_train_due_south <= 3:
+            if next_train_due_north <= 5 or next_train_due_south <= 3:
+                if next_train_due_north <= 5:
+                    state_direction = "North"
+                elif next_train_due_south <= 3:
+                    state_direction = "South"
                 print(">> Train approaching! Arming camera motion watch...")
                 if sensor:
                     extra_bg_frame = sensor.snapshot().copy()
                 current_state = STATE_ARMED_WATCH
                 armed_state_start = now
-            elif next_train_due <= 10:
+            elif next_train_due_north <= 10 or next_train_due_south <= 10:
                 poll_interval = 120000
             else:
                 poll_interval = 300000
@@ -309,27 +341,34 @@ def run_state_tick(now=None):
     # --- STATE 1: Motion Watch ---
     elif current_state == STATE_ARMED_WATCH:
         img = sensor.snapshot()
-        diff_img = img.difference(extra_bg_frame)
-        stats = diff_img.get_statistics(roi=TRACK_ROI)
+        if extra_bg_frame is not None:
+            diff_img = img.difference(extra_bg_frame)
+            stats = diff_img.get_statistics(roi=TRACK_ROI)
 
-        if stats.max > MOTION_THRESHOLD:
-            print(">> Motion Detected! Capturing frame...")
-            current_state = STATE_INFER_LOG
+            if stats.max > MOTION_THRESHOLD:
+                print(">> Motion Detected! Capturing frame...")
+                current_state = STATE_INFER_LOG
 
-        extra_bg_frame = img.copy()
+        extra_bg_frame.replace(img)
 
         if time.ticks_diff(now, armed_state_start) > 300000:
+            extra_bg_frame = None
+            gc.collect()
             current_state = STATE_API_POLL
 
     # --- STATE 2: Inference & Logging ---
     elif current_state == STATE_INFER_LOG:
-        img = sensor.snapshot()
+        img = sensor.snapshot() # image of train
         print(">> Event logged. Cooling down...")
+        extra_bg_frame = None
+        gc.collect()
+
         poll_interval = 180000
         last_api_check = now
-        record_camera_detection(last_api_check, epoch_now_sec=time.time())
+        record_camera_detection(last_api_check, state_direction, epoch_now_sec=time.time())
         global_counter += 1
         current_state = STATE_API_POLL
+        state_direction = "Unknown"
 
     return current_state
 
