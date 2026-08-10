@@ -9,6 +9,7 @@ sys.modules["sensor"] = MagicMock()
 sys.modules["network"] = MagicMock()
 sys.modules["ntptime"] = MagicMock()
 sys.modules["requests"] = MagicMock()
+sys.modules["tf"] = MagicMock()
 
 mock_time = MagicMock()
 mock_time.ticks_ms.return_value = 0
