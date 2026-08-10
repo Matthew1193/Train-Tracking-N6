@@ -1,0 +1,13 @@
+.venv/
+
+# Python bytecode & cache files
+__pycache__/
+*.pyc
+*.py[cod]
+*$py.class
+
+# Pytest cache
+.pytest_cache/
+
+# Binary or temporary files
+real-time
