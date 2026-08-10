@@ -415,6 +415,7 @@ def classify_train(img, roi):
 if __name__ == "__main__":
     if connect_wifi():
         init_camera()
+        init_ai_model()
         while True:
             run_state_tick()
             time.sleep_ms(10)
