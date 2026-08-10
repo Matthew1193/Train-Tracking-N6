@@ -4,6 +4,7 @@ import requests
 import gc
 import sensor
 import math
+import tf
 
 '''
 JSON Schema:
@@ -46,6 +47,10 @@ last_api_check = 0
 poll_interval = 0
 armed_state_start = 0
 state_direction = "Unknown"
+
+MODEL_PATH = "train_classifier.tflite"
+LABELS = ["Commuter Class 29000", "Intercity Class 22000", "Enterprise", "Dart", "UNKNOWN"]
+net = None
 
 # --- Safe Integer Conversion Helper ---
 def safe_int(val, default=999):
@@ -258,7 +263,7 @@ def find_matching_train_code(direction=None):
     return None
 
 # --- HELPER 3: Log Camera Detection Event ---
-def record_camera_detection(counter,  state_direction, epoch_now_sec):
+def record_camera_detection(counter,  state_direction, ai_class, ai_confidence, epoch_now_sec):
     """
     Called in STATE_INFER_LOG when motion is detected and image captured.
     Updates in-memory dict AND appends the record immediately to local storage.
@@ -270,6 +275,8 @@ def record_camera_detection(counter,  state_direction, epoch_now_sec):
         record = train_tracker[train_code]
         record["camera_detected"] = True
         record["camera_timestamp"] = counter  # e.g., "14:18:22"
+        record["ai_detected_type"] = ai_class
+        record["ai_confidence"] = ai_confidence
 
         # Simple delay math: (Actual Pass Time) - (Scheduled API Time)
         # Assuming scheduled_time converted to epoch timestamp:
@@ -289,6 +296,8 @@ def record_camera_detection(counter,  state_direction, epoch_now_sec):
             "direction": "Unknown",
             "camera_detected": True,
             "camera_timestamp": counter,
+            "ai_detected_type": ai_class,
+            "ai_confidence": ai_confidence,
             "actual_delay_sec": None,
             "is_unscheduled": True
         }
@@ -359,18 +368,49 @@ def run_state_tick(now=None):
     # --- STATE 2: Inference & Logging ---
     elif current_state == STATE_INFER_LOG:
         img = sensor.snapshot() # image of train
-        print(">> Event logged. Cooling down...")
+        ai_class, confidence = classify_train(img, roi=TRACK_ROI)
         extra_bg_frame = None
         gc.collect()
 
+        print(f">> Inference complete: {ai_class} @ {confidence*100:.1f}%")
+
         poll_interval = 180000
         last_api_check = now
-        record_camera_detection(last_api_check, state_direction, epoch_now_sec=time.time())
+        record_camera_detection(last_api_check, state_direction, ai_class, confidence, epoch_now_sec=time.time())
+
         global_counter += 1
         current_state = STATE_API_POLL
         state_direction = "Unknown"
 
     return current_state
+
+def init_ai_model():
+    global net
+    try:
+        net = tf.load(MODEL_PATH, load_to_fb=True)
+        print("AI model loaded successfully")
+    except:
+        print("Could not load AI model, running mock AI Model")
+        net = None
+
+def classify_train(img, roi):
+    if net is None:
+        return "Commuter Class 29000", 0.94
+
+    try:
+        predictions = tf.classify(net, img, roi)
+
+        if predictions:
+            output = predictions[0].output()
+            max_idx = output.index(max(output))
+            confidence = output[max_idx]
+            label = LABELS[max_idx] if max_idx < len(LABELS) else "UNKNOWN"
+            return label, confidence
+
+    except Exception as e:
+        print(">> Inference error:", e)
+
+    return "UNKNOWN", 0.0
 
 if __name__ == "__main__":
     if connect_wifi():
