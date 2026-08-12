@@ -5,6 +5,9 @@ import gc
 import sensor
 import math
 import tf
+import ntptime
+import json
+import os
 
 '''
 JSON Schema:
@@ -41,7 +44,6 @@ TRACK_ROI = (100, 100, 120, 80)
 MOTION_THRESHOLD = 25
 
 train_tracker = {}
-global_counter = 0
 current_state = STATE_API_POLL
 last_api_check = 0
 poll_interval = 0
@@ -97,6 +99,72 @@ def connect_wifi():
 
     print("Wi-Fi Connection Failed.")
     return False
+
+def sync_clock():
+    try:
+        ntptime.settime()
+        print(f"RTC synced via NTP: {time.localtime()}")
+    except Exception as e:
+        print(f"NTP sync failed: {e}")
+
+
+def build_json_record(train_code, data, observed_epoch):
+
+    now_struct = time.localtime(observed_epoch)
+    if data["is_unscheduled"] is not None:
+        sch_hour, sch_min = map(
+            int, data.get("scheduled_time", "00:00").split(":")
+        )
+
+        # Reconstruct scheduled epoch timestamp
+        sch_tuple = (
+            now_struct[0],
+            now_struct[1],
+            now_struct[2],
+            sch_hour,
+            sch_min,
+            0,
+            now_struct[6],
+            now_struct[7],
+        )
+        scheduled_epoch = time.mktime(sch_tuple)
+
+        actual_delay = (
+            (observed_epoch - scheduled_epoch)
+        )
+    else:
+        sch_tuple = (
+            now_struct[0],
+            now_struct[1],
+            now_struct[2],
+            now_struct[3],
+            now_struct[4],
+            now_struct[5],
+            now_struct[6],
+            now_struct[7],
+        )
+        actual_delay = None
+
+    payload = {
+        "train_code": train_code,
+        "train_type": data.get("ai_detected_type", "UNKNOWN"),
+        "origin": data.get("origin", "Unknown"),
+        "destination": data.get("destination", "Unknown"),
+        "direction": data.get("direction", "Unknown"),
+        "is_unscheduled": data.get("is_unscheduled", False),
+        "scheduled_epoch_time": scheduled_epoch,
+        "api_polled_epoch_time": data.get("api_polled_epoch", observed_epoch),
+        "api_delay_mins": data.get("api_delay_mins", 0),
+        "observed_epoch_time": observed_epoch,
+        "actual_delay_sec": actual_delay,
+        "api_error_sec": (
+            (actual_delay - (data.get("api_delay_mins", 0) * 60))
+            if actual_delay is not None
+            else 0
+        ),
+        "station_observer": "Rush and Lusk",
+    }
+    return payload
 
 def check_trains():
     stations = {"Donabate", "Rush%20and%20Lusk", "Drogheda", "Dublin%20Connolly"} # Search each station a certain period of time ahead to speed up API calls
@@ -179,7 +247,7 @@ def check_trains():
                                 local_due = due_in - 15
 
                         if 0 <= local_due < next_train_south:
-                                next_train_south = local_due
+                            next_train_south = local_due
 
                     update_schedule_from_api(
                             train_code=train_code,
@@ -258,9 +326,22 @@ def find_matching_train_code(direction=None):
     for code, data in train_tracker.items():
         if not data["camera_detected"] and not data["is_unscheduled"]:
             # Match if the train is due between 0 and 5 minutes from now
-            if direction in data["direction"]:
+            if direction in data["direction"] and 0 <= data["api_due_mins"] <= 5:
                 return code
     return None
+
+def log_event_to_disk(json_payload):
+    if "sd" in os.listdir("/"):
+        filepath = "/sd/train_log.json"
+    else:
+        filepath = "/train_log.json"
+
+    try:
+        with open(filepath, "a") as f:
+            f.write(json.dumps(json_payload) + "\n")
+        print(f">> Event written successfully to {filepath}")
+    except Exception as e:
+        print(f">> Failed to write log: {e}")
 
 # --- HELPER 3: Log Camera Detection Event ---
 def record_camera_detection(counter,  state_direction, ai_class, ai_confidence, epoch_now_sec):
@@ -288,7 +369,7 @@ def record_camera_detection(counter,  state_direction, ai_class, ai_confidence, 
         # No API match -> Create unscheduled entry (e.g., freight/maintenance)
         train_code = f"UNSCHED_{counter}"
         record = {
-            "scheduled_time": "N/A",
+            "scheduled_time": None,
             "api_due_mins": None,
             "api_delay_mins": None,
             "origin": "Unknown",
@@ -304,6 +385,9 @@ def record_camera_detection(counter,  state_direction, ai_class, ai_confidence, 
         train_tracker[train_code] = record
         print(f">> Unscheduled train detected! Logged as: {train_code}")
 
+    json_payload = build_json_record(train_code, record, epoch_now_sec)
+    log_event_to_disk(json_payload)
+
 def init_camera():
     sensor.reset()
     sensor.set_pixformat(sensor.RGB565)
@@ -314,7 +398,7 @@ def init_camera():
 
 def run_state_tick(now=None):
     """Executes a single step of the state machine."""
-    global current_state, last_api_check, poll_interval, extra_bg_frame, global_counter, armed_state_start, state_direction
+    global current_state, last_api_check, poll_interval, extra_bg_frame, armed_state_start, state_direction
 
     next_train_due_south = INT_MAX
     next_train_due_north = INT_MAX
@@ -333,9 +417,9 @@ def run_state_tick(now=None):
             last_api_check = now
 
             if next_train_due_north <= 5 or next_train_due_south <= 3:
-                if next_train_due_north <= 5:
+                if next_train_due_north <= next_train_due_south:
                     state_direction = "North"
-                elif next_train_due_south <= 3:
+                else:
                     state_direction = "South"
                 print(">> Train approaching! Arming camera motion watch...")
                 if sensor:
@@ -358,7 +442,8 @@ def run_state_tick(now=None):
                 print(">> Motion Detected! Capturing frame...")
                 current_state = STATE_INFER_LOG
 
-        extra_bg_frame.replace(img)
+                extra_bg_frame.replace(img)
+                gc.collect()
 
         if time.ticks_diff(now, armed_state_start) > 300000:
             extra_bg_frame = None
@@ -378,7 +463,6 @@ def run_state_tick(now=None):
         last_api_check = now
         record_camera_detection(last_api_check, state_direction, ai_class, confidence, epoch_now_sec=time.time())
 
-        global_counter += 1
         current_state = STATE_API_POLL
         state_direction = "Unknown"
 
@@ -414,6 +498,7 @@ def classify_train(img, roi):
 
 if __name__ == "__main__":
     if connect_wifi():
+        sync_clock()
         init_camera()
         init_ai_model()
         while True:
